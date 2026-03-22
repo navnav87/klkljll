@@ -1,0 +1,237 @@
+# 4. Réponse rapide à “qu’est-ce qu’on voit à chaque URL ?”
+
+## docs
+
+Swagger UI.  
+
+C’est une interface web qui lit l’OpenAPI de l’app et permet de tester les endpoints.
+
+## `/openapi.json`
+
+Le document OpenAPI brut généré automatiquement par FastAPI.  
+
+C’est la source standard consommée par docs.
+
+## `/swagger.json`
+
+Un endpoint custom défini dans swagger.py.  
+
+Il renvoie aussi le document OpenAPI, en appelant `app.openapi()`.
+
+## `/health`
+
+Un healthcheck applicatif minimal.  
+
+Aujourd’hui il retourne `ok`, sauf si de vrais checks sont ajoutés et échouent.
+
+## `/pyctuator/health`
+
+Un healthcheck technique géré par Pyctuator.  
+
+Il est distinct de `/health` et orienté observabilité.
+
+## `/users/{user_id}`
+
+Un exemple d’endpoint métier avec validation et erreurs.
+
+## `/demo/minio/*`
+
+Une démo de stockage objet.
+
+## `/demo/redis/*`
+
+Une démo de cache clé/valeur.
+
+---
+
+# 5. Description courte de chaque fichier important
+
+## Fichiers racine
+
+### pyproject.toml
+
+Déclare le projet, les dépendances, les extras, et les outils de qualité comme `pytest`, `ruff` et `mypy`.  
+
+C’est le centre de configuration du projet Python.
+
+### README.md
+
+Donne le mode d’emploi de base du projet, surtout autour du packaging et de l’installation.  
+
+C’est la porte d’entrée rapide pour comprendre comment exécuter ou distribuer l’application.
+
+### sonar-project.properties
+
+Configure l’analyse SonarQube/SonarCloud.  
+
+Il indique notamment les sources, les tests et la version Python ciblée.
+
+### build-offline-bundle.sh
+
+Prépare le bundle offline avec les wheels nécessaires.  
+
+Il sert pour les usages de distribution hors ligne.
+
+---
+
+## Application
+
+### main.py
+
+Crée l’instance FastAPI, configure le logging global, charge les settings et enregistre tous les routeurs.  
+
+C’est le point d’entrée principal de l’application.
+
+### cli.py
+
+Expose la commande `app-test` pour lancer l’application via `uvicorn`.  
+
+Il gère les arguments de lancement comme `host`, `port`, `reload` et SSL.
+
+### deps.py
+
+Contient les settings, les services applicatifs et les providers de dépendances FastAPI.  
+
+C’est ici que vivent les services MinIO, Redis et le service utilisateur.
+
+### actuator.py
+
+Branche Pyctuator sur l’application FastAPI.  
+
+Il configure les endpoints techniques et peut ajouter un health provider Redis.
+
+### __init__.py
+
+Marque app comme package Python.  
+
+Il n’a pas de logique métier.
+
+---
+
+## Routeurs
+
+### health.py
+
+Expose le endpoint `/health`.  
+
+Il renvoie `ok` ou `ko` selon le résultat du healthcheck.
+
+### swagger.py
+
+Expose le endpoint `/swagger.json`.  
+
+Il renvoie la spec OpenAPI générée dynamiquement par FastAPI.
+
+### users.py
+
+Expose le endpoint `/users/{user_id}`.  
+
+Il illustre la validation d’entrée, l’injection de dépendance et les erreurs `400` / `404`.
+
+### demo_minio.py
+
+Expose les endpoints de démonstration MinIO.  
+
+Il permet de consulter la config et d’uploader un fichier.
+
+### demo_redis.py
+
+Expose les endpoints Redis/Memurai.  
+
+Il contient aussi les modèles Pydantic `RedisValueIn` et `RedisValueOut`.
+
+### __init__.py
+
+Marque le dossier des routeurs comme package Python.  
+
+Il ne contient pas de logique métier.
+
+---
+
+## Tests
+
+### conftest.py
+
+Définit les fixtures partagées, notamment le `TestClient`.  
+
+Il évite de répéter la configuration de test dans chaque fichier.
+
+### test_app.py
+
+Teste les endpoints racine, health et swagger.  
+
+Il vérifie la structure basique et la cohérence du contrat API.
+
+### test_users.py
+
+Teste l’endpoint utilisateur et ses cas d’erreur.  
+
+Il montre aussi comment utiliser `dependency_overrides` et `mocker.patch`.
+
+### test_cli.py
+
+Teste le parseur d’arguments et l’appel à `uvicorn.run`.  
+
+Il prouve que la CLI est correcte sans lancer réellement le serveur.
+
+### test_demo_integrations.py
+
+Teste les endpoints MinIO, Redis et Pyctuator au niveau API.  
+
+Il remplace les services réels par des fakes pour rester indépendant des dépendances externes.
+
+### test_demo_services.py
+
+Teste la logique interne des services et le wiring Pyctuator.  
+
+Il mocke MinIO, Redis et Pyctuator pour valider les comportements métier et techniques.
+
+### __init__.py
+
+Marque tests comme package Python.  
+
+Il ne contient pas de logique.
+
+---
+
+## Documentation
+
+### conf.py
+
+Configure Sphinx et MyST.  
+
+Il définit notamment la langue et les extensions de documentation.
+
+### index.md
+
+Page d’accueil de la documentation Sphinx.  
+
+Elle présente le périmètre des démos et référence les pages détaillées.
+
+### minio.md
+
+Explique l’intégration MinIO et son cas d’usage de démo.  
+
+Elle décrit le but, les endpoints et le scénario de présentation.
+
+### redis-memurai.md
+
+Explique la démo Redis/Memurai.  
+
+Elle décrit le workflow `ping` / `set` / `get` / `delete` et son intérêt.
+
+### pyctuator.md
+
+Explique le rôle de Pyctuator et ses endpoints.  
+
+Elle positionne cette brique comme couche d’observabilité.
+
+---
+
+# 6. Script oral très court de conclusion
+
+> L’application montre d’abord comment FastAPI documente automatiquement une API via OpenAPI et Swagger, puis comment cette API est testée proprement sans lancer un vrai serveur.  
+
+> Ensuite, elle illustre trois briques typiques d’un backend moderne : le stockage objet avec MinIO, le cache avec Redis/Memurai, et l’observabilité avec Pyctuator.
+
+Si tu veux, je peux maintenant te faire une **version ultra compacte “slide deck”**, en **10 slides maximum**, directement réutilisable.
