@@ -1,333 +1,549 @@
-Oui. Voici un **scénario de démo très simple**, concret, et facile à faire en présentation pour les **3 briques** : **MinIO**, **Memurai/Redis**, **Pyctuator**.
+Summarized conversation history
 
-Le principe :  
-tu racontes une petite application de démonstration où :
+Searched for files matching `**/tests/**/*.py`, 7 matches
 
-- on **dépose un fichier** dans MinIO,
-- on **stocke un statut temporaire** dans Redis/Memurai,
-- on **surveille l’état technique** de l’application avec Pyctuator.
+Read [](file:///c%3A/Projets/app%20test/pyproject.toml)
 
----
+Read [](file:///c%3A/Projets/app%20test/tests/conftest.py)
 
-# Scénario global de démo
+Read [](file:///c%3A/Projets/app%20test/tests/test_app.py)
 
-## Histoire simple à raconter
-> On imagine une petite application qui reçoit un document, conserve un statut temporaire de traitement, et expose son état de santé et ses métriques pour être supervisée.
+Read [](file:///c%3A/Projets/app%20test/tests/test_cli.py)
 
-Tu peux l’appeler oralement :
+Read [](file:///c%3A/Projets/app%20test/tests/test_users.py)
 
-- **“mini portail de dépôt de document”**
-ou
-- **“mini service de traitement documentaire”**
+Read [](file:///c%3A/Projets/app%20test/tests/test_demo_integrations.py)
 
-C’est simple, crédible, et ça colle bien aux 3 briques.
+Read [](file:///c%3A/Projets/app%20test/tests/test_demo_services.py)
 
----
+Here is the exact test story, in presentation form.
 
-# 1. Démo MinIO — dépôt d’un fichier
+## What the test suite is doing overall
 
-## Ce que tu racontes
-> Ici, je simule un utilisateur qui dépose un document dans l’application.  
-> L’application ne garde pas le fichier localement : elle l’envoie dans un stockage objet compatible S3, ici MinIO.
+Pytest is configured to discover tests under tests and to measure coverage on the whole app package via pyproject.toml.
 
-## Ce que tu fais — step by step
+So when these tests run, they are checking 3 different layers:
 
-### Étape 1 — montrer la configuration
-Appeler :
-- `/demo/minio/config`
+1. **HTTP/API behavior**  
+   “If a client calls this route, what HTTP status and JSON come back?”
 
-### Ce que tu dis
-> Je vérifie d’abord que l’application connaît bien la configuration MinIO et le bucket cible.
+2. **Service behavior**  
+   “If the internal service class is called, does it build clients, parse config, and wrap errors correctly?”
 
-### Ce que tu obtiens
-Une réponse JSON avec par exemple :
-- `configured`
-- `endpoint`
-- `bucket`
-- `secure`
-
-### Message à faire passer
-> L’application sait vers quel stockage objet elle va envoyer le fichier.
+3. **Wiring / dependency injection**  
+   “Does FastAPI inject the right service? Can it be replaced by a fake in tests?”
 
 ---
 
-### Étape 2 — uploader un fichier
-Appeler :
-- `/demo/minio/upload`
+## The shared fixture: how requests are made without a real server
 
-Depuis Swagger, tu sélectionnes un petit fichier texte ou PDF.
+In conftest.py, there is one shared fixture: `client`.
 
-### Ce que tu dis
-> Ici, je simule l’envoi d’un document à l’application.  
-> L’application reçoit le fichier, crée le bucket si nécessaire, puis envoie l’objet dans MinIO.
+That fixture returns `TestClient(app)`.
 
-### Ce que tu obtiens
-Une réponse JSON avec :
-- `bucket`
-- `object_name`
-- `etag`
-- éventuellement `version_id`
+What this means:
 
-### Message à faire passer
-> On a donc un vrai cas de stockage externe de fichier, comme dans une application métier réelle.
+- tests can call `client.get(...)` and `client.post(...)`
+- **no real Uvicorn server is started**
+- **no real port 8000 is used**
+- requests are executed **in memory inside Python**
+
+So when the suite tests `/health` or `/users/42`, it is not doing a real network deployment test.  
+It is testing the FastAPI app directly.
 
 ---
 
-### Résumé oral pour MinIO
-> MinIO sert ici à illustrer le stockage objet.  
-> L’application reçoit un fichier via HTTP et le dépose dans un bucket compatible S3.
+## 1) test_app.py: basic API contract tests
+
+This file tests the simplest public routes.
+
+### `TestHealthEndpoint`
+It checks `/health`:
+
+- response code is `200`
+- JSON is `{"status": "ok"}`
+- a second test checks that the response contains a `status` key and that the value is either `ok` or `ko`
+
+### Why 2 health tests?
+Because they test two things:
+
+- **exact current behavior**: today it returns `{"status": "ok"}`
+- **acceptable contract shape**: if the app later returns `ko`, the schema still makes sense
+
+So one test is strict, the other is more future-proof.
+
+### `TestSwaggerEndpoint`
+It checks `/swagger.json`:
+
+- route exists and returns `200`
+- returned JSON contains OpenAPI structure keys:
+  - `openapi`
+  - `info`
+  - `paths`
+- `info.title` is `"App Test API"`
+- `info.version` is `"0.1.0"`
+
+This is not validating every detail of the schema.  
+It is validating that the custom Swagger endpoint exposes a **proper OpenAPI document**.
+
+### `TestRootEndpoint`
+It checks `/`:
+
+- status is `200`
+- body is `{"message": "Hello world!"}`
+
+So this file is basically: **“Is the public app alive and returning the expected top-level responses?”**
+
+### Small detail
+This file defines its own `client` fixture again, even though conftest.py already provides one.  
+That is redundant, not dangerous.
 
 ---
 
-# 2. Démo Memurai / Redis — statut temporaire du document
+## 2) test_cli.py: command-line startup tests
 
-## Ce que tu racontes
-> Une fois le document déposé, on peut imaginer que l’application veuille garder un petit état temporaire en mémoire, par exemple “document reçu”, “traitement en cours”, ou “traitement terminé”.  
-> Cet état n’a pas besoin d’être stocké durablement : il est parfait pour Redis ou Memurai.
+This file does **not** test HTTP routes.
 
-Tu peux utiliser cet exemple de clé :
-- `document:demo:status`
+It tests the CLI layer in cli.py.
 
-et cette valeur :
-- `uploaded`
+### `test_build_parser_defaults()`
+This checks that the argument parser default values are correct:
+
+- host = `127.0.0.1`
+- port = `8000`
+- reload = `False`
+- log level = `info`
+- SSL files = `None`
+
+So this test answers:  
+**“If the user launches `app-test` without arguments, what settings are assumed?”**
+
+### `test_main_calls_uvicorn_run()`
+This is very important for presentation.
+
+The test:
+
+- mocks `parse_args()` so no real command line is needed
+- mocks `uvicorn.run`
+- calls `cli.main()`
+- verifies that `uvicorn.run(...)` is called once with the expected values
+
+So:
+
+- **the server is not actually started**
+- the test only proves that the CLI **forwards parsed arguments correctly** to Uvicorn
+
+That is a classic unit test of a startup wrapper.
 
 ---
 
-## Ce que tu fais — step by step
+## 3) test_users.py: route behavior + dependency injection
 
-### Étape 1 — tester la connectivité
-Appeler :
-- `/demo/redis/ping`
+This file is useful to explain FastAPI dependency injection.
 
-### Ce que tu dis
-> Je vérifie que le backend Redis-compatible est disponible.
+### `test_users_endpoint_via_testclient()`
+This calls `/users/1` with the real default setup.
 
-### Ce que tu obtiens
-```json
-{"ok": true}
-```
+Expected result:
 
-### Message
-> Le cache mémoire est accessible.
+- HTTP `200`
+- `{"id": 1, "name": "real"}`
+
+This proves the normal happy path with the real `UserService`.
+
+### `test_users_mock_dependency_override()`
+This is the most “FastAPI” test in the suite.
+
+It creates a fake class `FakeService` with a `get_user()` method.
+
+Then it uses:
+
+- `client.app.dependency_overrides[get_user_service] = lambda: FakeService()`
+
+That tells FastAPI:
+
+> “When the route asks for `get_user_service`, do not use the real service. Inject this fake one instead.”
+
+Then `/users/42` returns:
+
+- HTTP `200`
+- `{"id": 42, "name": "mocked"}`
+
+What this proves:
+
+- route logic is separated from service implementation
+- dependencies are replaceable
+- the endpoint uses FastAPI injection correctly
+
+This is excellent presentation material.
+
+### `test_users_http_error_400()`
+This calls `/users/0`.
+
+Expected:
+
+- HTTP `400`
+- detail = `"invalid id"`
+
+This checks the router’s validation/business rule for invalid IDs.
+
+### `test_users_http_error_404_with_mocker()`
+This uses `pytest-mock`:
+
+- patches `app.deps.UserService.get_user` to always return `None`
+- calls `/users/123`
+
+Expected:
+
+- HTTP `404`
+- detail = `"not found"`
+
+What this proves:
+
+- if the service says “no user exists”, the route translates that into a `404`
+
+So this file is really testing:
+
+- normal success
+- dependency override with a fake
+- invalid input branch
+- not-found branch
 
 ---
 
-### Étape 2 — stocker un statut
-Appeler :
+## 4) test_demo_integrations.py: endpoint tests with fake MinIO and fake Redis
+
+This file is called “integrations”, but it is still using **fake services**, not real backend servers.
+
+That distinction matters for your presentation.
+
+## Fake MinIO
+`FakeMinioService` implements the same methods the route expects:
+
+- `describe()`
+- `upload_file()`
+
+It returns predictable fake data.
+
+### `test_minio_config_endpoint()`
+Overrides `get_minio_service` with `FakeMinioService`.
+
+Then calls `/demo/minio/config`.
+
+It checks:
+
+- status `200`
+- `configured` is `True`
+- `bucket` is `"demo-bucket"`
+
+So the route is tested end-to-end, but **without a real MinIO server**.
+
+### `test_minio_upload_endpoint()`
+Again overrides the MinIO dependency.
+
+Then sends a multipart file upload to `/demo/minio/upload`.
+
+It checks that the endpoint returns the right metadata:
+
+- bucket = `"slides"`
+- object_name = `"demo.txt"`
+
+Important point:
+this test proves the HTTP upload route works, the form-data is parsed, and the route forwards arguments correctly.
+
+It does **not** prove that a real file is stored in MinIO.
+
+---
+
+## Fake Redis
+`FakeRedisService` simulates:
+
+- `describe()`
+- `ping()`
+- `set_value()`
+- `get_value()`
+- `delete_value()`
+
+It stores data in a simple Python dictionary.
+
+### `test_redis_ping_and_kv_endpoints()`
+Overrides `get_redis_service` with the fake service.
+
+Then it tests the full sequence:
+
+- `GET /demo/redis/ping`
 - `POST /demo/redis/kv`
+- `GET /demo/redis/kv/demo`
+- `DELETE /demo/redis/kv/demo`
 
-Payload :
-```json
-{
-  "key": "document:demo:status",
-  "value": "uploaded",
-  "ttl_seconds": 300
-}
-```
+Expected behavior:
 
-### Ce que tu dis
-> Je stocke un état temporaire lié à mon document.  
-> Ici je dis simplement que le document a été uploadé, avec un TTL de 5 minutes.
+- ping returns `{"ok": True}`
+- set returns success
+- get returns `{"key": "demo", "value": "works"}`
+- delete returns `{"deleted": 1}`
 
-### Ce que tu obtiens
-Une réponse JSON qui confirme :
-- la clé,
-- la valeur,
-- le TTL.
+So this proves the route contract for the Redis demo endpoints.
 
-### Message
-> Redis/Memurai sert ici de mémoire rapide et temporaire.
+Again: **route logic is tested, not the real Redis server.**
 
 ---
 
-### Étape 3 — relire le statut
-Appeler :
-- `GET /demo/redis/kv/document:demo:status`
+## Pyctuator health
+### `test_pyctuator_health_endpoint()`
+Calls `/pyctuator/health`.
 
-### Ce que tu dis
-> Je relis immédiatement l’état associé à ce document.
+Checks:
 
-### Ce que tu obtiens
-```json
-{
-  "key": "document:demo:status",
-  "value": "uploaded"
-}
-```
+- status `200`
+- payload contains `status`
+- status is either `UP` or `DOWN`
 
-### Message
-> Cela montre un accès ultra simple et ultra rapide à une donnée temporaire.
+This is intentionally loose.  
+It proves the actuator endpoint exists and responds with actuator-style health JSON.
 
 ---
 
-### Étape 4 — supprimer la donnée
-Appeler :
-- `DELETE /demo/redis/kv/document:demo:status`
+## 5) test_demo_services.py: real unit tests of internals
 
-### Ce que tu dis
-> Une fois l’information devenue inutile, je la supprime.  
-> C’est exactement le comportement attendu d’un cache ou d’un état transitoire.
+This is the deepest and most technical file.
 
-### Ce que tu obtiens
-```json
-{"deleted": 1}
-```
+It tests the service classes directly, without going through HTTP routes.
 
 ---
 
-### Résumé oral pour Redis/Memurai
-> Redis ou Memurai sert ici à stocker rapidement une petite information temporaire, par exemple l’état d’un document en cours de traitement.
+## `build_settings(...)`
+This helper builds an `AppSettings` object with defaults.
+
+Why it exists:
+
+- tests can create settings quickly
+- each test overrides only the fields it cares about
+- avoids relying on the real machine environment
+
+This is a classic test helper.
 
 ---
 
-# 3. Démo Pyctuator — supervision du service
+## `test_as_bool_and_get_settings()`
+This test checks configuration parsing.
 
-## Ce que tu racontes
-> Maintenant que l’application stocke des fichiers et utilise un cache, il faut aussi pouvoir la superviser.  
-> C’est là qu’intervient Pyctuator, qui expose des endpoints de monitoring inspirés de Spring Boot Actuator.
+It does 2 things:
 
----
+1. clears the `get_settings()` cache
+2. sets environment variables with `monkeypatch.setenv(...)`
 
-## Ce que tu fais — step by step
+Then it verifies:
 
-### Étape 1 — vérifier la santé
-Appeler :
-- `/pyctuator/health`
+- `_as_bool(" on ")` becomes `True`
+- `_as_bool(None, default=True)` becomes `True`
+- `MINIO_SECURE="true"` becomes boolean `True`
+- `MINIO_BUCKET="slides"` is loaded
+- `REDIS_PORT="6380"` becomes integer `6380`
+- `PYCTUATOR_APP_URL="https://demo.local"` leads to endpoint URL `https://demo.local/pyctuator`
+- `PYCTUATOR_ENABLE_REDIS_HEALTH="yes"` becomes `True`
 
-### Ce que tu dis
-> Je commence par vérifier l’état global du service.
+This test is important because it explains why environment variables drive behavior.
 
-### Ce que tu obtiens
-Un JSON avec un statut de type :
-- `UP`
-ou parfois `DOWN` si un provider de santé échoue.
-
-### Message
-> Cet endpoint sert à savoir immédiatement si le service est sain.
+It also proves why, in real life, **changing env vars requires a restart**: `get_settings()` is cached.
 
 ---
 
-### Étape 2 — afficher les infos applicatives
-Appeler :
-- `/pyctuator/info`
+## MinIO service tests
 
-### Ce que tu dis
-> Ici, j’accède à des informations techniques sur l’instance qui tourne : nom, version, informations de build.
+### `test_minio_service_describe_and_missing_config()`
+Builds settings with missing MinIO credentials and endpoint.
 
-### Ce que tu obtiens
-Un JSON d’information sur l’application.
+Checks:
 
-### Message
-> Cela permet d’identifier précisément quelle version est en cours d’exécution.
+- `describe()["configured"]` is `False`
+- calling `upload_file(...)` raises `DemoConfigurationError`
 
----
+So this is the “MinIO not configured” branch.
 
-### Étape 3 — montrer les métriques
-Appeler :
-- `/pyctuator/metrics`
+This directly matches the behavior you saw live earlier.
 
-### Ce que tu dis
-> Je regarde maintenant les métriques disponibles sur le service.
+### `test_minio_service_upload_success()`
+This monkeypatches the `Minio` client class itself with a fake client.
 
-### Ce que tu obtiens
-Une liste de métriques exposées par Pyctuator.
+The fake client records:
 
-### Message
-> Cela illustre la capacité de l’application à être surveillée techniquement.
+- bucket existence check
+- bucket creation
+- uploaded object name
+- content type
+- payload bytes
 
----
+Then the service uploads a file.
 
-### Étape 4 — éventuellement montrer les traces HTTP
-Appeler :
-- `/pyctuator/httptrace`
+The test verifies:
 
-### Ce que tu dis
-> Ici, on voit les traces HTTP récentes.  
-> C’est utile pour comprendre quelles requêtes sont passées dans le service.
+- the bucket is created if missing
+- default content type becomes `application/octet-stream` when none is provided
+- payload bytes are correct
+- returned metadata includes fake `etag` and `version_id`
 
-### Ce que tu obtiens
-Des traces de requêtes récemment faites, souvent justement celles que tu viens d’exécuter.
+So this proves the service’s upload logic, independent of the real MinIO SDK server connection.
 
-### Message
-> On ne se contente pas d’exposer un service ; on l’observe aussi.
+### `test_minio_service_upload_error()`
+This replaces the MinIO client with one that raises an exception during upload.
 
----
+Expected result:
 
-### Résumé oral pour Pyctuator
-> Pyctuator ajoute la couche d’observabilité : santé, informations de build, métriques et traces HTTP.
+- service raises `DemoServiceError`
 
----
+So the service wraps backend failures into the app’s own exception type.
 
-# Enchaînement complet conseillé pendant la démo
-
-Voici le meilleur ordre pour que ce soit fluide :
-
-## Étape A — MinIO
-1. `/demo/minio/config`
-2. `/demo/minio/upload`
-
-### Message
-> Je dépose un fichier dans un stockage objet.
+That is a very important architectural point:
+**backend exceptions are normalized into application exceptions.**
 
 ---
 
-## Étape B — Redis / Memurai
-3. `/demo/redis/ping`
-4. `POST /demo/redis/kv`
-5. `GET /demo/redis/kv/document:demo:status`
-6. `DELETE /demo/redis/kv/document:demo:status`
+## Redis service tests
 
-### Message
-> Je stocke et relis un état temporaire rapide.
+### `test_redis_service_methods_and_client_creation()`
+This is the happy-path unit test for Redis.
 
----
+It monkeypatches `Redis` with a fake client and checks:
 
-## Étape C — Pyctuator
-7. `/pyctuator/health`
-8. `/pyctuator/info`
-9. `/pyctuator/metrics`
-10. `/pyctuator/httptrace`
+- `_create_client()` builds the client with the correct host/port/db/user/password
+- `ping()` returns `True`
+- `set_value(...)` stores data and keeps TTL info
+- `get_value(...)` returns stored data
+- `delete_value(...)` deletes data
+- missing key returns `None`
 
-### Message
-> Je montre ensuite comment superviser l’application techniquement.
+So it proves both:
 
----
+- client creation parameters are correct
+- service methods behave correctly
 
-# Version “script oral” prête à dire
+### `test_redis_service_error_paths()`
+This is parameterized.
 
-> Dans cette démo, je simule une petite application de dépôt de document.  
-> D’abord, je charge un fichier dans MinIO pour montrer un stockage objet compatible S3.  
-> Ensuite, j’utilise Redis ou Memurai pour mémoriser temporairement l’état du document, par exemple “uploaded”.  
-> Enfin, avec Pyctuator, je montre les endpoints de supervision qui permettent de vérifier la santé du service, ses informations techniques et ses métriques.
+That means the same test logic is run multiple times with different method names:
 
----
+- `ping`
+- `set`
+- `get`
+- `delete`
 
-# Ce que tu obtiens au final dans la tête du public
+A fake Redis client raises `RuntimeError("boom")` for every call.
 
-Le public comprend que :
+Expected result each time:
 
-- **MinIO** = stockage de fichier
-- **Redis/Memurai** = état temporaire / cache
-- **Pyctuator** = supervision
+- the service raises `DemoServiceError`
+- the error message matches the operation:
+  - `"Redis ping failed"`
+  - `"Redis SET failed"`
+  - `"Redis GET failed"`
+  - `"Redis DELETE failed"`
 
-Donc les 3 briques ne sont pas redondantes, elles sont **complémentaires**.
-
----
-
-# Version ultra courte par brique
-
-## MinIO
-> Je dépose un fichier dans un bucket.
-
-## Redis / Memurai
-> Je garde un état temporaire du document.
-
-## Pyctuator
-> Je supervise le service qui traite ce document.
+So this verifies error wrapping consistently across all Redis operations.
 
 ---
 
-Si tu veux, je peux maintenant te faire la version **100% démo live**, avec :
-- les **requêtes exactes à lancer dans Swagger**
-- les **phrases exactes à prononcer**
-- et un **timing minute par minute**.
+## Dependency factory tests
+
+### `test_dependency_provider_helpers()`
+This checks the small helper functions:
+
+- `get_user_service()`
+- `get_minio_service()`
+- `get_redis_service()`
+
+It monkeypatches `get_settings()` to return known settings, then verifies each helper returns the correct service class.
+
+This is a simple wiring test:
+**“Do the FastAPI dependency factories build the right objects?”**
+
+---
+
+## Pyctuator wiring test
+
+### `test_configure_pyctuator_with_optional_redis_health()`
+This is a pure wiring/configuration test.
+
+It replaces:
+
+- `Pyctuator`
+- `Redis`
+- `RedisHealthProvider`
+
+with fake objects that only record what they receive.
+
+Then it calls `configure_pyctuator(app, settings)`.
+
+It verifies:
+
+- environment provider is registered under `"demo"`
+- environment data says Redis health is enabled
+- Redis health provider is registered with the correct Redis connection settings
+- `app.state.pyctuator` is set
+
+So this proves the app wires Pyctuator correctly when Redis health is enabled.
+
+---
+
+# What tools/mechanisms the tests use
+
+## `TestClient`
+Used for fake HTTP requests directly against FastAPI.
+
+## `dependency_overrides`
+Used to replace real FastAPI dependencies with fakes.
+
+That is how route tests avoid talking to real MinIO or Redis.
+
+## `monkeypatch`
+Used for:
+
+- environment variables
+- replacing imported classes/functions during a test
+
+Very useful for configuration and SDK replacement.
+
+## `mocker.patch`
+Used for classic mocking of methods/functions, like `uvicorn.run` or `UserService.get_user`.
+
+---
+
+# What is tested vs what is not tested
+
+## Tested
+- route status codes and JSON contracts
+- CLI argument forwarding
+- dependency injection behavior
+- environment parsing
+- service happy paths
+- service error wrapping
+- Pyctuator wiring
+
+## Not tested
+- real MinIO connectivity
+- real Redis/Memurai connectivity
+- real TLS/HTTPS certificates
+- real external network behavior
+
+So the live failures you saw with MinIO and Redis are **not contradictions of the tests**.
+
+The tests prove:
+
+- the app code behaves correctly **if given the right dependencies**
+- the app code correctly reports/wraps backend failures
+
+But they do not prove that an actual MinIO or Memurai process is running on your machine.
+
+---
+
+# Best presentation summary
+
+A good one-sentence summary is:
+
+> The test suite is layered: it checks the HTTP contract with `TestClient`, isolates external systems through FastAPI dependency overrides and monkeypatching, and unit-tests the service/configuration layer so behavior is validated without requiring real MinIO or Redis servers.
+
+And the key takeaway is:
+
+> Most tests are designed to validate the app’s logic and wiring, not the availability of external infrastructure.
+
+If useful, the next step can be a **slide-by-slide oral script** for presenting these test files in 2 minutes.
